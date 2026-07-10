@@ -136,6 +136,16 @@ or details.
               "trained using the VCTK dataset. Not used for single-speaker "
               "models, e.g., models trained using the LJSpeech dataset");
 
+  std::string sid_blend;
+  po.Register(
+      "sid-blend", &sid_blend,
+      "Speak with a weighted blend of several speakers' styles instead of "
+      "the single speaker in --sid. Supported by models that select the "
+      "speaker via a style embedding, e.g., Kokoro. Format: "
+      "sid[:weight][,sid[:weight]]..., e.g., 5:60,3:40. A missing weight "
+      "means 1; weights are normalized to sum to 1. When set, --sid is "
+      "ignored.");
+
   po.Register("speed", &gen_config.speed,
               "Speech speed. Larger=faster. Used by Supertonic, VITS, etc. "
               "(float, default = 1.0)");
@@ -179,6 +189,10 @@ or details.
                          !config.model.zipvoice.decoder.empty();
 
   gen_config.sid = sid;
+
+  if (!sid_blend.empty()) {
+    gen_config.extra["style_blend"] = sid_blend;
+  }
 
   if (is_supertonic_tts && !lang.empty()) {
     gen_config.extra["lang"] = lang;

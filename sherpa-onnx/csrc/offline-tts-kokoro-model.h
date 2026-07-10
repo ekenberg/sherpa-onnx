@@ -7,6 +7,8 @@
 
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "onnxruntime_cxx_api.h"  // NOLINT
 #include "sherpa-onnx/csrc/offline-tts-kokoro-model-meta-data.h"
@@ -26,6 +28,14 @@ class OfflineTtsKokoroModel {
   // Return a float32 tensor containing the samples
   // of shape (batch_size, num_samples)
   Ort::Value Run(Ort::Value x, int64_t sid = 0, float speed = 1.0) const;
+
+  // Like Run(x, sid, speed), but the style embedding is a weighted
+  // average of several speakers' styles. Each pair is (sid, weight);
+  // weights must sum to 1 (see ParseStyleBlend() in
+  // ./offline-tts-style-blend.h).
+  Ort::Value Run(Ort::Value x,
+                 const std::vector<std::pair<int32_t, float>> &sid_weights,
+                 float speed = 1.0) const;
 
   const OfflineTtsKokoroModelMetaData &GetMetaData() const;
 

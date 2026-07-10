@@ -23,6 +23,7 @@
 #include "sherpa-onnx/csrc/offline-tts-frontend.h"
 #include "sherpa-onnx/csrc/offline-tts-impl.h"
 #include "sherpa-onnx/csrc/offline-tts-kokoro-model.h"
+#include "sherpa-onnx/csrc/offline-tts-style-blend.h"
 #include "sherpa-onnx/csrc/piper-phonemize-lexicon.h"
 #include "sherpa-onnx/csrc/text-utils.h"
 
@@ -152,6 +153,9 @@ class OfflineTtsKokoroImpl : public OfflineTtsImpl {
   // Supported extra options in config.extra:
   //   - lang: Language override for Kokoro >= 1.0. Defaults to
   //           kokoro.lang if provided, otherwise meta_data.voice.
+  //   - style_blend: Speak with a weighted blend of several speakers'
+  //                  styles instead of the single speaker in sid.
+  //                  Format: "sid[:weight][,sid[:weight]]...".
   GeneratedAudio Generate(
       const std::string &_text, const GenerationConfig &gen_config,
       GeneratedAudioCallback callback = nullptr) const override {
@@ -196,6 +200,19 @@ class OfflineTtsKokoroImpl : public OfflineTtsImpl {
           num_speakers, 0, num_speakers - 1, static_cast<int32_t>(sid));
 #endif
       sid = 0;
+    }
+
+    // A non-empty "style_blend" in gen_config.extra replaces the single
+    // speaker sid with a weighted average of several speakers' styles.
+    // Format: "sid[:weight][,sid[:weight]]...", e.g., "5:60,3:40".
+    std::vector<std::pair<int32_t, float>> sid_weights;
+    std::string style_blend = gen_config.GetExtraString("style_blend");
+    if (!style_blend.empty()) {
+      sid_weights = ParseStyleBlend(style_blend, num_speakers);
+      if (sid_weights.empty()) {
+        // ParseStyleBlend has already logged the reason
+        return {};
+      }
     }
 
     std::string text = _text;
@@ -312,7 +329,7 @@ class OfflineTtsKokoroImpl : public OfflineTtsImpl {
       }
 
       auto audio =
-          Process(batch_x, sid, speed, gen_config.silence_scale);
+          Process(batch_x, sid, sid_weights, speed, gen_config.silence_scale);
       ans.sample_rate = audio.sample_rate;
       ans.samples.insert(ans.samples.end(), audio.samples.begin(),
                          audio.samples.end());
@@ -334,7 +351,7 @@ class OfflineTtsKokoroImpl : public OfflineTtsImpl {
 
     if (!batch_x.empty()) {
       auto audio =
-          Process(batch_x, sid, speed, gen_config.silence_scale);
+          Process(batch_x, sid, sid_weights, speed, gen_config.silence_scale);
       ans.sample_rate = audio.sample_rate;
       ans.samples.insert(ans.samples.end(), audio.samples.begin(),
                          audio.samples.end());
@@ -417,9 +434,12 @@ class OfflineTtsKokoroImpl : public OfflineTtsImpl {
         config_.model.kokoro.tokens, config_.model.kokoro.data_dir, meta_data);
   }
 
-  GeneratedAudio Process(const std::vector<std::vector<int64_t>> &tokens,
-                         int32_t sid, float speed,
-                         float silence_scale) const {
+  // A non-empty sid_weights takes precedence over sid and selects a
+  // blended style; see ParseStyleBlend() in offline-tts-style-blend.h.
+  GeneratedAudio Process(
+      const std::vector<std::vector<int64_t>> &tokens, int32_t sid,
+      const std::vector<std::pair<int32_t, float>> &sid_weights, float speed,
+      float silence_scale) const {
     int32_t num_tokens = 0;
     for (const auto &k : tokens) {
       num_tokens += k.size();
@@ -438,7 +458,10 @@ class OfflineTtsKokoroImpl : public OfflineTtsImpl {
     Ort::Value x_tensor = Ort::Value::CreateTensor(
         memory_info, x.data(), x.size(), x_shape.data(), x_shape.size());
 
-    Ort::Value audio = model_->Run(std::move(x_tensor), sid, speed);
+    Ort::Value audio = sid_weights.empty()
+                           ? model_->Run(std::move(x_tensor), sid, speed)
+                           : model_->Run(std::move(x_tensor), sid_weights,
+                                         speed);
 
     std::vector<int64_t> audio_shape =
         audio.GetTensorTypeAndShapeInfo().GetShape();

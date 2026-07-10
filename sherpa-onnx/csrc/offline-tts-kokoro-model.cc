@@ -58,9 +58,39 @@ class OfflineTtsKokoroModel::Impl {
   }
 
   Ort::Value Run(Ort::Value x, int32_t sid, float speed) {
-    auto memory_info =
-        Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    int32_t len = StyleRowIndex(x);
+    int32_t dim0 = style_dim_[0];
+    int32_t dim1 = style_dim_[2];
 
+    const float *style = styles_.data() + sid * dim0 * dim1 + len * dim1;
+
+    return RunWithStyle(std::move(x), style, speed);
+  }
+
+  Ort::Value Run(Ort::Value x,
+                 const std::vector<std::pair<int32_t, float>> &sid_weights,
+                 float speed) {
+    int32_t len = StyleRowIndex(x);
+    int32_t dim0 = style_dim_[0];
+    int32_t dim1 = style_dim_[2];
+
+    // Weighted average of the speakers' style rows. The weights are
+    // already normalized, so this stays a valid style embedding.
+    std::vector<float> blended(dim1, 0.0f);
+    for (const auto &sw : sid_weights) {
+      const float *p = styles_.data() + sw.first * dim0 * dim1 + len * dim1;
+      for (int32_t i = 0; i != dim1; ++i) {
+        blended[i] += sw.second * p[i];
+      }
+    }
+
+    return RunWithStyle(std::move(x), blended.data(), speed);
+  }
+
+ private:
+  // Validate x, of shape (1, num_tokens), and return the row index into
+  // the per-speaker style table matching its token length.
+  int32_t StyleRowIndex(const Ort::Value &x) const {
     std::vector<int64_t> x_shape = x.GetTensorTypeAndShapeInfo().GetShape();
     if (x_shape[0] != 1) {
       SHERPA_ONNX_LOGE("Support only batch_size == 1. Given: %d",
@@ -70,20 +100,27 @@ class OfflineTtsKokoroModel::Impl {
 
     // there is a 0 at the front and end of x
     int32_t len = static_cast<int32_t>(x_shape[1]) - 2;
-    int32_t num_speakers = meta_data_.num_speakers;
-    int32_t dim0 = style_dim_[0];
-    int32_t dim1 = style_dim_[2];
-    if (len >= dim0) {
-      SHERPA_ONNX_LOGE("Bad things happened! %d vs %d", len, dim0);
+    if (len >= style_dim_[0]) {
+      SHERPA_ONNX_LOGE("Bad things happened! %d vs %d", len, style_dim_[0]);
       SHERPA_ONNX_EXIT(-1);
     }
 
-    /*const*/ float *p = styles_.data() + sid * dim0 * dim1 + len * dim1;
+    return len;
+  }
+
+  // Run the model with the given style embedding. style must point to
+  // style_dim_[2] floats and stay valid until this returns; it is only
+  // read (CreateTensor borrows the buffer through a non-const pointer).
+  Ort::Value RunWithStyle(Ort::Value x, const float *style, float speed) {
+    auto memory_info =
+        Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+    int32_t dim1 = style_dim_[2];
 
     std::array<int64_t, 2> style_embedding_shape = {1, dim1};
     Ort::Value style_embedding = Ort::Value::CreateTensor(
-        memory_info, p, dim1, style_embedding_shape.data(),
-        style_embedding_shape.size());
+        memory_info, const_cast<float *>(style), dim1,
+        style_embedding_shape.data(), style_embedding_shape.size());
 
     int64_t speed_shape = 1;
     if (config_.kokoro.length_scale != 1 && speed == 1) {
@@ -103,7 +140,6 @@ class OfflineTtsKokoroModel::Impl {
     return std::move(out[0]);
   }
 
- private:
   void Init(void *model_data, size_t model_data_length, const char *voices_data,
             size_t voices_data_length) {
     if (model_data) {
@@ -251,6 +287,12 @@ const OfflineTtsKokoroModelMetaData &OfflineTtsKokoroModel::GetMetaData()
 Ort::Value OfflineTtsKokoroModel::Run(Ort::Value x, int64_t sid /*= 0*/,
                                       float speed /*= 1.0*/) const {
   return impl_->Run(std::move(x), sid, speed);
+}
+
+Ort::Value OfflineTtsKokoroModel::Run(
+    Ort::Value x, const std::vector<std::pair<int32_t, float>> &sid_weights,
+    float speed /*= 1.0*/) const {
+  return impl_->Run(std::move(x), sid_weights, speed);
 }
 
 #if __ANDROID_API__ >= 9
